@@ -1,0 +1,12 @@
+version: "3.8"
+services:
+  web:
+    build: .
+    ports:
+      - "4567:4567"
+    volumes:
+      - ./:/app
+      - ./data:/app/data
+    environment:
+      WORDGUESS_DB: "/app/data/wordguess.db"
+      WORDGUESS_JWT_SECRET: "cambia_en_produccion"

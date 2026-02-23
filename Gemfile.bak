@@ -1,0 +1,352 @@
+# WordguessSinatraApp.rb
+require 'sinatra'
+require 'sequel'
+require 'json'
+require 'bcrypt'
+require 'jwt'
+require 'time'
+
+# --- Config ---
+DB_FILE = ENV.fetch('WORDGUESS_DB') { 'wordguess.db' }
+DB = Sequel.sqlite(DB_FILE)
+DEFAULT_SECRET = 'cambia_esto_por_un_secreto_largo' # override in production
+JWT_SECRET = ENV.fetch('WORDGUESS_JWT_SECRET', DEFAULT_SECRET)
+JWT_ALG = 'HS256'
+
+# Optional: reduce ugly HTML errors, return JSON instead
+set :show_exceptions, false
+set :raise_errors, false
+
+# --- Schema (create tables if missing) ---
+DB.create_table? :users do
+  primary_key :id
+  String :username, null: false, unique: true
+  String :password_digest, null: false
+  Integer :wins, default: 0
+  Integer :losses, default: 0
+  DateTime :created_at
+end
+
+DB.create_table? :words do
+  primary_key :id
+  String :text, null: false
+  String :difficulty, null: false
+  Date :date
+  DateTime :created_at
+end
+
+DB.create_table? :games do
+  primary_key :id
+  foreign_key :user_id, :users
+  foreign_key :word_id, :words
+  Integer :attempts_allowed
+  Integer :attempts_used, default: 0
+  String :status, default: 'playing'
+  DateTime :created_at
+  DateTime :updated_at
+end
+
+DB.create_table? :attempts do
+  primary_key :id
+  foreign_key :game_id, :games
+  String :guess
+  Boolean :correct
+  DateTime :created_at
+end
+
+USERS = DB[:users]
+WORDS = DB[:words]
+GAMES = DB[:games]
+ATTEMPTS = DB[:attempts]
+
+# --- Helpers ---
+helpers do
+  def json(body)
+    content_type :json
+    body.to_json
+  end
+
+  def hash_password(plain)
+    BCrypt::Password.create(plain)
+  end
+
+  def password_ok?(digest, plain)
+    BCrypt::Password.new(digest) == plain
+  end
+
+  def generate_token(user_id, exp_seconds = 3 * 3600)
+    payload = { user_id: user_id, iat: Time.now.to_i, exp: (Time.now + exp_seconds).to_i }
+    JWT.encode(payload, JWT_SECRET, JWT_ALG)
+  end
+
+  def decode_token(token)
+    JWT.decode(token, JWT_SECRET, true, { algorithm: JWT_ALG })[0]
+  rescue JWT::DecodeError, JWT::ExpiredSignature
+    nil
+  end
+
+  def auth_user!
+    auth_header = request.env['HTTP_AUTHORIZATION']
+    halt 401, json(error: 'missing authorization header') unless auth_header
+    token = auth_header.split(' ').last
+    payload = decode_token(token)
+    halt 401, json(error: 'invalid or expired token') unless payload
+    user = USERS.where(id: payload['user_id']).first
+    halt 401, json(error: 'user not found') unless user
+    user
+  end
+
+  def attempts_for_difficulty(diff)
+    case diff.to_s.downcase
+    when 'easy' then 8
+    when 'medium' then 6
+    when 'hard' then 4
+    else 6
+    end
+  end
+
+  def match_feedback(word, guess)
+    word_chars = word.chars
+    guess_chars = guess.chars
+    positions = guess_chars.each_with_index.map { |ch, i| ch == word_chars[i] }
+    {
+      correct: guess == word,
+      positions: positions,
+      letter_matches_count: guess_chars.each_with_index.count { |ch,i| word_chars.include?(ch) && ch != word_chars[i] }
+    }
+  end
+
+  def parse_json_body(halt_on_invalid: true)
+    request.body.rewind if request.body.respond_to?(:rewind)
+    raw = request.body.read
+    return {} if raw.nil? || raw.strip.empty?
+    begin
+      JSON.parse(raw)
+    rescue JSON::ParserError
+      halt 400, json(error: 'invalid json') if halt_on_invalid
+      {}
+    end
+  end
+end
+
+error do
+  e = env['sinatra.error']
+  status 500
+  json(error: 'internal server error', message: e&.message)
+end
+
+before do
+  content_type 'application/json'
+end
+
+# --- Endpoints ---
+
+get '/health' do
+  json(status: 'ok')
+end
+
+post '/register' do
+  payload = parse_json_body
+  username = payload['username']
+  password = payload['password']
+  halt 400, json(error: 'username and password required') unless username && password
+  existing = USERS.where(username: username).first
+  halt 409, json(error: 'username taken') if existing
+  id = USERS.insert(username: username, password_digest: hash_password(password), created_at: Time.now)
+  user = USERS.where(id: id).first
+  json(id: user[:id], username: user[:username], created_at: user[:created_at])
+end
+
+post '/login' do
+  payload = parse_json_body
+  username = payload['username']
+  password = payload['password']
+  halt 400, json(error: 'username and password required') unless username && password
+  user = USERS.where(username: username).first
+  halt 401, json(error: 'invalid credentials') unless user && password_ok?(user[:password_digest], password)
+  token = generate_token(user[:id])
+  json(token: token)
+end
+
+post '/words' do
+  user = auth_user!
+  payload = parse_json_body
+  text = payload['text']&.strip&.downcase
+  difficulty = payload['difficulty'] || 'medium'
+  date = payload['date']
+  halt 400, json(error: 'text required') unless text && text.length > 0
+  parsed_date = nil
+  if date && !date.to_s.empty?
+    parsed_date = begin
+      Date.parse(date)
+    rescue ArgumentError, TypeError
+      nil
+    end
+  end
+  id = WORDS.insert(text: text, difficulty: difficulty, date: parsed_date, created_at: Time.now)
+  word = WORDS.where(id: id).first
+  json(id: word[:id], text: word[:text], difficulty: word[:difficulty], date: word[:date])
+end
+
+get '/words' do
+  q = WORDS
+  if params['date']
+    parsed_date = begin
+      Date.parse(params['date'])
+    rescue ArgumentError, TypeError
+      nil
+    end
+    halt 400, json(error: 'invalid date format') unless parsed_date
+    q = q.where(date: parsed_date)
+  end
+  q = q.where(difficulty: params['difficulty']) if params['difficulty']
+  words = q.all.map { |w| { id: w[:id], text: w[:text], difficulty: w[:difficulty], date: w[:date] } }
+  json(words: words)
+end
+
+post '/games' do
+  user = auth_user!
+  payload = parse_json_body
+  date = payload['date']
+  if date
+    parsed_date = begin
+      Date.parse(date)
+    rescue ArgumentError, TypeError
+      nil
+    end
+    halt 400, json(error: 'invalid date format') unless parsed_date
+    word_row = WORDS.where(date: parsed_date).first
+    halt 404, json(error: 'no word for that date') unless word_row
+  else
+    word_row = WORDS.order(Sequel.lit('RANDOM()')).first
+    halt 404, json(error: 'no words yet') unless word_row
+  end
+  attempts_allowed = attempts_for_difficulty(word_row[:difficulty])
+  gid = GAMES.insert(user_id: user[:id], word_id: word_row[:id], attempts_allowed: attempts_allowed, attempts_used: 0, status: 'playing', created_at: Time.now, updated_at: Time.now)
+  game = GAMES.where(id: gid).first
+  json(id: game[:id], attempts_allowed: game[:attempts_allowed], status: game[:status], word_id: word_row[:id])
+end
+
+get '/games/:id' do |id|
+  user = auth_user!
+  game = GAMES.where(id: id, user_id: user[:id]).first
+  halt 404, json(error: 'game not found') unless game
+  attempts = ATTEMPTS.where(game_id: game[:id]).all.map { |a| { id: a[:id], guess: a[:guess], correct: a[:correct], created_at: a[:created_at] } }
+  word = WORDS.where(id: game[:word_id]).first
+  json(id: game[:id], attempts_allowed: game[:attempts_allowed], attempts_used: game[:attempts_used], status: game[:status], attempts: attempts, word_length: word[:text].length)
+end
+
+post '/games/:id/attempts' do |id|
+  user = auth_user!
+  game = GAMES.where(id: id, user_id: user[:id]).first
+  halt 404, json(error: 'game not found') unless game
+  halt 400, json(error: 'game already finished') if %w[won lost].include?(game[:status])
+
+  payload = parse_json_body
+  guess = payload['guess']&.strip&.downcase
+  halt 400, json(error: 'guess required') unless guess
+
+  word = WORDS.where(id: game[:word_id]).first
+  feedback = match_feedback(word[:text], guess)
+  correct = feedback[:correct]
+
+  ATTEMPTS.insert(game_id: game[:id], guess: guess, correct: correct, created_at: Time.now)
+  new_attempts_used = game[:attempts_used] + 1
+  new_status = 'playing'
+  if correct
+    new_status = 'won'
+    USERS.where(id: user[:id]).update(wins: Sequel[:wins] + 1)
+  elsif new_attempts_used >= game[:attempts_allowed]
+    new_status = 'lost'
+    USERS.where(id: user[:id]).update(losses: Sequel[:losses] + 1)
+  end
+
+  GAMES.where(id: game[:id]).update(attempts_used: new_attempts_used, status: new_status, updated_at: Time.now)
+
+  json(correct: correct, status: new_status, feedback: feedback)
+end
+
+get '/me/games' do
+  user = auth_user!
+  games = GAMES.where(user_id: user[:id]).order(Sequel.desc(:created_at)).all.map do |g|
+    w = WORDS.where(id: g[:word_id]).first
+    {
+      id: g[:id], status: g[:status], attempts_allowed: g[:attempts_allowed], attempts_used: g[:attempts_used], word_length: w[:text].length, created_at: g[:created_at]
+    }
+  end
+  json(games: games)
+end
+
+get '/leaderboard' do
+  rows = DB.fetch(<<~SQL)
+    SELECT u.id, u.username, u.wins, u.losses,
+      (SELECT AVG(a_count) FROM (
+        SELECT COUNT(*) as a_count FROM attempts a
+        JOIN games g ON g.id = a.game_id
+        WHERE g.user_id = u.id AND g.status = 'won'
+        GROUP BY g.id
+      )) as avg_attempts_per_win
+    FROM users u
+    ORDER BY u.wins DESC, avg_attempts_per_win ASC NULLS LAST
+    LIMIT 20
+  SQL
+
+  data = rows.map do |r|
+    { id: r[:id], username: r[:username], wins: r[:wins], losses: r[:losses], avg_attempts_per_win: (r[:avg_attempts_per_win] && r[:avg_attempts_per_win].to_f) }
+  end
+  json(leaderboard: data)
+end
+
+get '/openapi.json' do
+  spec = {
+    openapi: '3.0.1',
+    info: { title: 'Wordguess API (Sinatra)', version: '1.0.0' },
+    servers: [{ url: request.base_url }],
+    paths: {
+      '/register' => { post: { summary: 'Register user' } },
+      '/login' => { post: { summary: 'Login' } },
+      '/words' => { get: { summary: 'List words' }, post: { summary: 'Create word' } },
+      '/games' => { post: { summary: 'Start game' } },
+      '/games/{id}' => { get: { summary: 'Get game state' } },
+      '/games/{id}/attempts' => { post: { summary: 'Submit attempt' } },
+      '/me/games' => { get: { summary: 'My games' } },
+      '/leaderboard' => { get: { summary: 'Leaderboard' } }
+    }
+  }
+  json(spec)
+end
+
+get '/docs' do
+  content_type 'text/html'
+  <<~HTML
+  <!doctype html>
+  <html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Wordguess API Docs</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist/swagger-ui.css" />
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist/swagger-ui-bundle.js"></script>
+    <script>
+      SwaggerUIBundle({ url: '/openapi.json', dom_id: '#swagger-ui' });
+    </script>
+  </body>
+  </html>
+  HTML
+end
+
+post '/_seed_demo' do
+  return json(seed: 'already seeded') if WORDS.count > 0
+  WORDS.insert(text: 'apple', difficulty: 'easy', date: Date.today - 1, created_at: Time.now)
+  WORDS.insert(text: 'zebra', difficulty: 'medium', date: Date.today, created_at: Time.now)
+  WORDS.insert(text: 'query', difficulty: 'hard', date: Date.today + 1, created_at: Time.now)
+  json(seed: 'ok')
+end
+
+if __FILE__ == $0
+  port = ENV.fetch('PORT', 4567).to_i
+  puts "Starting Wordguess Sinatra API on port #{port} -- DB: #{DB_FILE}"
+  Sinatra::Application.run! port: port, bind: '127.0.0.1'
+end

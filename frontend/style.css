@@ -1,0 +1,170 @@
+/* style.css - Wordguess centrado y elegante */
+
+/* Reset */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* Body centrado vertical y horizontal */
+body {
+  background: #0d1117;
+  color: #c9d1d9;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center; /* CENTRADO VERTICAL */
+  padding: 2rem;
+}
+
+/* Contenedor principal centrado */
+.container {
+  max-width: 480px;
+  width: 100%;
+  text-align: center;
+  background: #161b22;
+  padding: 2rem;
+  border-radius: 12px;
+  box-shadow: 0 0 20px rgba(0,0,0,0.6);
+  display: flex;
+  flex-direction: column;
+  align-items: center; /* CENTRADO HORIZONTAL DE TODO */
+}
+
+/* Título */
+h1 {
+  font-size: 2.2rem;
+  margin-bottom: 1.5rem;
+  color: #58a6ff;
+  text-shadow: 0 0 6px rgba(88,166,255,0.5);
+}
+
+/* Formularios */
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  width: 100%;
+  margin-bottom: 2rem;
+}
+
+/* Inputs */
+input[type="text"],
+input[type="password"] {
+  padding: 0.7rem 1rem;
+  font-size: 1rem;
+  border: 2px solid #30363d;
+  border-radius: 8px;
+  background: #0d1117;
+  color: #c9d1d9;
+  transition: border 0.2s;
+  width: 100%;
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus {
+  border-color: #58a6ff;
+  outline: none;
+}
+
+/* Botones */
+button {
+  padding: 0.7rem 1rem;
+  font-size: 1rem;
+  border: none;
+  border-radius: 8px;
+  background: #238636;
+  color: #ffffff;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background 0.2s;
+  width: 100%;
+}
+
+button:hover {
+  background: #2ea043;
+}
+
+/* Mensajes */
+.message {
+  margin: 0.5rem 0;
+  font-size: 0.95rem;
+  color: #f85149;
+}
+
+.message.success {
+  color: #56d364;
+}
+
+/* Tablero centrado */
+.board {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0.5rem;
+  justify-content: center; /* CENTRADO */
+  margin-bottom: 2rem;
+}
+
+.tile {
+  width: 60px;
+  height: 60px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 2rem;
+  font-weight: bold;
+  border-radius: 8px;
+  background: #161b22;
+  color: #c9d1d9;
+  text-transform: uppercase;
+  transition: transform 0.2s, background 0.3s;
+}
+
+.tile.correct { background: #238636; color: #ffffff; }
+.tile.present { background: #d29922; color: #ffffff; }
+.tile.absent  { background: #484f58; color: #b1b8c0; }
+
+/* Intentos previos */
+.attempts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+/* Leaderboard */
+.leaderboard {
+  margin-top: 2rem;
+  text-align: center; /* centrado */
+  border-top: 1px solid #30363d;
+  padding-top: 1rem;
+}
+
+.leaderboard h2 {
+  font-size: 1.3rem;
+  margin-bottom: 0.5rem;
+  color: #58a6ff;
+}
+
+.leaderboard ul {
+  list-style: none;
+  padding: 0;
+}
+
+.leaderboard li {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #30363d;
+  display: flex;
+  justify-content: space-between;
+}
+
+/* Responsive */
+@media (max-width: 500px) {
+  .tile {
+    width: 50px;
+    height: 50px;
+    font-size: 1.5rem;
+  }
+}

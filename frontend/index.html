@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Wordguess Game</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>Wordguess Game</h1>
+
+<div class="section" id="register-section">
+  <h2>Registro</h2>
+  <input type="text" id="reg-username" placeholder="Usuario">
+  <input type="password" id="reg-password" placeholder="Contraseña">
+  <button onclick="register()">Registrar</button>
+  <div id="reg-msg"></div>
+</div>
+
+<div class="section" id="login-section">
+  <h2>Login</h2>
+  <input type="text" id="login-username" placeholder="Usuario">
+  <input type="password" id="login-password" placeholder="Contraseña">
+  <button onclick="login()">Login</button>
+  <div id="login-msg"></div>
+</div>
+
+<div class="section" id="game-section" style="display:none;">
+  <h2>Juego</h2>
+  <button onclick="startGame()">Iniciar juego</button>
+  <div id="game-info"></div>
+  <div id="attempt-section" style="display:none;">
+    <input type="text" id="guess-input" placeholder="Tu intento">
+    <button onclick="submitAttempt()">Enviar intento</button>
+  </div>
+  <div id="attempts-list"></div>
+</div>
+
+<script>
+  const API_BASE = 'http://127.0.0.1:4567';
+
+  async function register() {
+    const username = document.getElementById('reg-username').value;
+    const password = document.getElementById('reg-password').value;
+    const res = await fetch(`${API_BASE}/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    const data = await res.json();
+    document.getElementById('reg-msg').innerText = JSON.stringify(data);
+  }
+
+  async function login() {
+    const username = document.getElementById('login-username').value;
+    const password = document.getElementById('login-password').value;
+    const res = await fetch(`${API_BASE}/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include', // importante para enviar/recibir cookies
+      body: JSON.stringify({ username, password })
+    });
+    const data = await res.json();
+    document.getElementById('login-msg').innerText = JSON.stringify(data);
+    if(res.ok) {
+      document.getElementById('game-section').style.display = 'block';
+    }
+  }
+
+  let currentGame = null;
+
+  async function startGame() {
+    const res = await fetch(`${API_BASE}/games`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include'
+    });
+    const data = await res.json();
+    if(res.ok) {
+      currentGame = data;
+      document.getElementById('game-info').innerText = `Juego iniciado. Intentos permitidos: ${data.attempts_allowed}, longitud de palabra: ${data.word_length}`;
+      document.getElementById('attempt-section').style.display = 'block';
+      document.getElementById('attempts-list').innerHTML = '';
+    } else {
+      alert(JSON.stringify(data));
+    }
+  }
+
+  async function submitAttempt() {
+    const guess = document.getElementById('guess-input').value;
+    if(!currentGame) return;
+    const res = await fetch(`${API_BASE}/games/${currentGame.id}/attempts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ guess })
+    });
+    const data = await res.json();
+    if(res.ok) {
+      const attemptDiv = document.createElement('div');
+      attemptDiv.className = 'attempt';
+      attemptDiv.innerHTML = `Intento: <b>${guess}</b> - ${data.correct ? '<span class="correct">Correcto!</span>' : '<span class="wrong">Incorrecto</span>'} - Status: ${data.status}`;
+      document.getElementById('attempts-list').appendChild(attemptDiv);
+      if(data.status !== 'playing') {
+        alert(`Juego terminado: ${data.status}`);
+        currentGame = null;
+        document.getElementById('attempt-section').style.display = 'none';
+      }
+    } else {
+      alert(JSON.stringify(data));
+    }
+    document.getElementById('guess-input').value = '';
+  }
+</script>
+
+</body>
+</html>
