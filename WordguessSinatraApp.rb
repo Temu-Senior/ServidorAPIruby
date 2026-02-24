@@ -9,7 +9,11 @@ require 'time'
 require 'date'
 
 # ---------------- CONFIG ----------------
-DB_FILE = ENV.fetch('WORDGUESS_DB') { 'wordguess.db' }
+# Bind y puerto (usa PORT si está en el entorno)
+set :bind, '0.0.0.0'
+set :port, ENV.fetch('PORT', 4567).to_i
+
+DB_FILE = ENV.fetch('WORDGUESS_DB') { '/app/data/wordguess.db' }
 DB = Sequel.sqlite(DB_FILE)
 JWT_SECRET = ENV.fetch('WORDGUESS_JWT_SECRET', 'super_secreto_cambiar_en_produccion')
 JWT_ALG = 'HS256'
@@ -570,9 +574,9 @@ end
 # Servir otros assets de la carpeta frontend (CSS, JS, imágenes)
 set :public_folder, File.join(settings.root, 'frontend')
 
-# Run server
+# Run server (si se ejecuta el archivo directamente)
 if __FILE__ == $0
-  port = ENV.fetch('PORT', 4567).to_i
+  port = settings.port || ENV.fetch('PORT', 4567).to_i
   puts "Starting Wordguess Sinatra API on port #{port} -- DB: #{DB_FILE}"
-  Sinatra::Application.run! port: port, bind: '127.0.0.1'
+  Sinatra::Application.run! port: port, bind: '0.0.0.0'
 end
