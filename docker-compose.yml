@@ -1,12 +1,22 @@
 version: "3.8"
+
 services:
   web:
     build: .
+    container_name: wordguess_api
+    restart: unless-stopped
+
     ports:
       - "4567:4567"
+
     volumes:
       - ./:/app
       - ./data:/app/data
+
     environment:
+      RACK_ENV: development
       WORDGUESS_DB: "/app/data/wordguess.db"
-      WORDGUESS_JWT_SECRET: "cambia_en_produccion"
+      WORDGUESS_JWT_SECRET: "09a3f6f6-bc93-4a7b-bcf3-b8fa5f527547aef8bb3d-aa1b-4fda-b317-8b7f0a450f2a"
+      CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:5500"
+
+    command: ruby WordguessSinatraApp.rb

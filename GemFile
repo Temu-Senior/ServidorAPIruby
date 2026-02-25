@@ -8,6 +8,7 @@ gem "jwt", "~> 2.6"
 gem 'puma'
 gem 'rackup'
 gem 'sinatra-cross_origin'
+gem 'rack-attack'
 
 # Dev / test
 gem "rspec", "~> 3.12"
