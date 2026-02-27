@@ -52,7 +52,6 @@ if ENV['RACK_ENV'] == 'production' && JWT_SECRET == 'super_secreto_cambiar_en_pr
 end
 
 # ---------------- RACK ATTACK (rate limiting) ----------------
-# ---------------- RACK ATTACK (rate limiting) ----------------
 class Rack::Attack
   # limit logins: 5 per minute per IP
   throttle('logins/ip', limit: 5, period: 60) do |req|
@@ -620,7 +619,7 @@ post '/make-me-admin' do
   render_success({ message: 'now you are admin' })
 end
 
-# OpenAPI (unchanged structure)
+# OpenAPI
 get '/openapi.json' do
   spec = {
     openapi: '3.0.1',
@@ -642,6 +641,7 @@ get '/openapi.json' do
           properties: {
             username: {
               type: 'string',
+              description: 'Nombre de usuario. Solo letras, números y guion bajo. Longitud 3-20.',
               example: 'angel',
               minLength: 3,
               maxLength: 20,
@@ -649,6 +649,7 @@ get '/openapi.json' do
             },
             password: {
               type: 'string',
+              description: 'Contraseña. Mínimo 6 caracteres.',
               example: 'secret123',
               minLength: 6,
               format: 'password'
@@ -659,8 +660,17 @@ get '/openapi.json' do
           type: 'object',
           required: ['username', 'password'],
           properties: {
-            username: { type: 'string', example: 'angel' },
-            password: { type: 'string', example: 'secret123', format: 'password' }
+            username: {
+              type: 'string',
+              description: 'Nombre de usuario registrado.',
+              example: 'angel'
+            },
+            password: {
+              type: 'string',
+              description: 'Contraseña del usuario.',
+              example: 'secret123',
+              format: 'password'
+            }
           }
         },
         Error: {
@@ -669,158 +679,578 @@ get '/openapi.json' do
             success: { type: 'boolean', example: false },
             error: { type: 'string', example: 'mensaje de error' }
           }
+        },
+        Word: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', description: 'ID único de la palabra' },
+            text: { type: 'string', description: 'La palabra' },
+            difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'], description: 'Dificultad' },
+            date: { type: 'string', format: 'date', description: 'Fecha asociada a la palabra' }
+          }
+        },
+        Game: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', description: 'ID de la partida' },
+            attempts_allowed: { type: 'integer', description: 'Número máximo de intentos permitidos' },
+            attempts_used: { type: 'integer', description: 'Intentos realizados' },
+            status: { type: 'string', enum: ['playing', 'won', 'lost'], description: 'Estado de la partida' },
+            word_length: { type: 'integer', description: 'Longitud de la palabra a adivinar' },
+            created_at: { type: 'string', format: 'date-time', description: 'Fecha de creación' }
+          }
+        },
+        Attempt: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', description: 'ID del intento' },
+            guess: { type: 'string', description: 'Palabra intentada' },
+            correct: { type: 'boolean', description: 'Si el intento fue correcto' },
+            created_at: { type: 'string', format: 'date-time', description: 'Momento del intento' }
+          }
         }
       }
     },
     paths: {
       '/health' => {
         get: {
+          tags: ['Status'],
           summary: 'Health check',
+          description: 'Verifica que el servidor y la base de datos estén funcionando.',
           responses: {
             '200' => {
-              description: 'OK',
-              content: { 'application/json' => { example: { status: 'ok', message: 'server running' } } }
+              description: 'Servidor OK',
+              content: {
+                'application/json' => {
+                  example: { success: true, data: { status: 'ok', db: 'connected' } }
+                }
+              }
+            },
+            '500' => {
+              description: 'Error de conexión con la base de datos',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
             }
           }
         }
       },
       '/register' => {
         post: {
+          tags: ['Auth'],
           summary: 'Register user',
+          description: 'Crea una nueva cuenta de usuario.',
           requestBody: {
             required: true,
-            content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/RegisterRequest' } } }
+            content: {
+              'application/json' => {
+                schema: { '$ref' => '#/components/schemas/RegisterRequest' }
+              }
+            }
           },
           responses: {
-            '201' => { description: 'Created', content: { 'application/json' => { example: { message: 'user created', id: 1, username: 'angel' } } } },
-            '400' => { description: 'Bad Request' },
-            '409' => { description: 'Conflict' }
+            '201' => {
+              description: 'Usuario creado exitosamente',
+              content: {
+                'application/json' => {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean', example: true },
+                      data: {
+                        type: 'object',
+                        properties: {
+                          id: { type: 'integer', description: 'ID del nuevo usuario' },
+                          username: { type: 'string', description: 'Nombre de usuario' }
+                        }
+                      }
+                    }
+                  },
+                  example: { success: true, data: { id: 1, username: 'angel' } }
+                }
+              }
+            },
+            '400' => {
+              description: 'Datos inválidos (formato de usuario o contraseña incorrectos)',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '409' => {
+              description: 'El nombre de usuario ya existe',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
       '/login' => {
         post: {
-          summary: 'Login user (sets HttpOnly cookie)',
+          tags: ['Auth'],
+          summary: 'Login user',
+          description: 'Inicia sesión y devuelve un token JWT (en cookie HttpOnly y en el cuerpo).',
           requestBody: {
             required: true,
-            content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/LoginRequest' } } }
+            content: {
+              'application/json' => {
+                schema: { '$ref' => '#/components/schemas/LoginRequest' }
+              }
+            }
           },
           responses: {
-            '200' => { description: 'OK', content: { 'application/json' => { example: { message: 'login successful' } } } },
-            '400' => { description: 'Bad Request' },
-            '401' => { description: 'Unauthorized' }
+            '200' => {
+              description: 'Login exitoso',
+              content: {
+                'application/json' => {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean', example: true },
+                      data: {
+                        type: 'object',
+                        properties: {
+                          message: { type: 'string', example: 'login successful' },
+                          token: { type: 'string', description: 'Token JWT para usar en Bearer Auth' }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            '400' => {
+              description: 'Faltan credenciales',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '401' => {
+              description: 'Credenciales inválidas',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
       '/logout' => {
         post: {
-          summary: 'Logout user (deletes cookie)',
+          tags: ['Auth'],
+          summary: 'Logout user',
+          description: 'Cierra la sesión actual, revoca el token y elimina las cookies.',
+          security: [{ bearerAuth: [] }, { cookieAuth: [] }],
           responses: {
-            '200' => { description: 'OK', content: { 'application/json' => { example: { message: 'logged out' } } } }
+            '200' => {
+              description: 'Logout exitoso',
+              content: {
+                'application/json' => {
+                  example: { success: true, data: { message: 'logged out' } }
+                }
+              }
+            }
           }
         }
       },
       '/words' => {
         get: {
-          summary: 'List words (optional filters: date, difficulty)',
+          tags: ['Words'],
+          summary: 'List words',
+          description: 'Obtiene lista de palabras. Opcionalmente filtra por fecha y/o dificultad.',
           parameters: [
-            { name: 'date', in: 'query', schema: { type: 'string', format: 'date' }, required: false },
-            { name: 'difficulty', in: 'query', schema: { type: 'string' }, required: false }
+            {
+              name: 'date',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', format: 'date' },
+              description: 'Fecha en formato YYYY-MM-DD. Devuelve la palabra asignada a esa fecha.'
+            },
+            {
+              name: 'difficulty',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', enum: ['easy', 'medium', 'hard'] },
+              description: 'Dificultad de la palabra.'
+            }
           ],
-          responses: { '200' => { description: 'OK' } }
+          responses: {
+            '200' => {
+              description: 'Lista de palabras',
+              content: {
+                'application/json' => {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean' },
+                      data: {
+                        type: 'object',
+                        properties: {
+                          words: {
+                            type: 'array',
+                            items: { '$ref' => '#/components/schemas/Word' }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            '400' => {
+              description: 'Formato de fecha inválido',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
+          }
         },
         post: {
-          summary: 'Create a word (auth required)',
-          security: [{ cookieAuth: [] }],
+          tags: ['Words'],
+          summary: 'Create a word',
+          description: 'Crea una nueva palabra (solo para administradores).',
+          security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,
             content: {
               'application/json' => {
                 schema: {
                   type: 'object',
-                  properties: { text: { type: 'string' }, difficulty: { type: 'string' }, date: { type: 'string', format: 'date' } },
-                  required: ['text']
+                  required: ['text'],
+                  properties: {
+                    text: {
+                      type: 'string',
+                      description: 'La palabra a agregar. Se guardará en minúsculas.'
+                    },
+                    difficulty: {
+                      type: 'string',
+                      enum: ['easy', 'medium', 'hard'],
+                      default: 'medium',
+                      description: 'Dificultad de la palabra.'
+                    },
+                    date: {
+                      type: 'string',
+                      format: 'date',
+                      description: 'Fecha asociada a la palabra (opcional).'
+                    }
+                  }
                 }
               }
             }
           },
           responses: {
-            '201' => { description: 'Created' },
-            '400' => { description: 'Bad Request' },
-            '401' => { description: 'Unauthorized' }
+            '201' => {
+              description: 'Palabra creada',
+              content: {
+                'application/json' => {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean' },
+                      data: { '$ref' => '#/components/schemas/Word' }
+                    }
+                  }
+                }
+              }
+            },
+            '400' => {
+              description: 'Texto requerido o fecha inválida',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '401' => {
+              description: 'No autenticado',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '403' => {
+              description: 'Requiere rol de administrador',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
       '/games' => {
         post: {
-          summary: 'Start game (auth required)',
+          tags: ['Games'],
+          summary: 'Start a new game',
+          description: 'Inicia una nueva partida para el usuario autenticado.',
           security: [{ bearerAuth: [] }],
           requestBody: {
             required: false,
             content: {
               'application/json' => {
-                schema: { type: 'object', properties: { date: { type: 'string', format: 'date' } } }
+                schema: {
+                  type: 'object',
+                  properties: {
+                    date: {
+                      type: 'string',
+                      format: 'date',
+                      description: 'Fecha de la palabra a jugar. Si no se envía, se elige una palabra al azar.'
+                    }
+                  }
+                }
               }
             }
           },
           responses: {
-            '201' => { description: 'Game started' },
-            '400' => { description: 'Bad Request' },
-            '401' => { description: 'Unauthorized' },
-            '404' => { description: 'Not Found' }
+            '201' => {
+              description: 'Partida creada',
+              content: {
+                'application/json' => {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean' },
+                      data: { '$ref' => '#/components/schemas/Game' }
+                    }
+                  }
+                }
+              }
+            },
+            '400' => {
+              description: 'Formato de fecha inválido',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '401' => {
+              description: 'No autenticado',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '404' => {
+              description: 'No hay palabra para la fecha indicada o no hay palabras disponibles',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
       '/games/{id}' => {
         get: {
-          summary: 'Get game state (auth required)',
+          tags: ['Games'],
+          summary: 'Get game state',
+          description: 'Obtiene el estado actual de una partida, incluyendo los intentos realizados.',
           security: [{ bearerAuth: [] }],
-          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer' } }],
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'integer' },
+              description: 'ID de la partida'
+            }
+          ],
           responses: {
-            '200' => { description: 'OK' },
-            '401' => { description: 'Unauthorized' },
-            '404' => { description: 'Not Found' }
+            '200' => {
+              description: 'Estado de la partida',
+              content: {
+                'application/json' => {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean' },
+                      data: {
+                        allOf: [
+                          { '$ref' => '#/components/schemas/Game' },
+                          {
+                            type: 'object',
+                            properties: {
+                              attempts: {
+                                type: 'array',
+                                items: { '$ref' => '#/components/schemas/Attempt' },
+                                description: 'Lista de intentos realizados'
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            '401' => {
+              description: 'No autenticado',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '404' => {
+              description: 'Partida no encontrada o no pertenece al usuario',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
       '/games/{id}/attempts' => {
         post: {
-          summary: 'Submit attempt (auth required)',
+          tags: ['Games'],
+          summary: 'Submit an attempt',
+          description: 'Envía una palabra como intento para la partida especificada.',
           security: [{ bearerAuth: [] }],
-          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer' } }],
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'integer' },
+              description: 'ID de la partida'
+            }
+          ],
           requestBody: {
             required: true,
             content: {
               'application/json' => {
-                schema: { type: 'object', properties: { guess: { type: 'string' } }, required: ['guess'] }
+                schema: {
+                  type: 'object',
+                  required: ['guess'],
+                  properties: {
+                    guess: {
+                      type: 'string',
+                      description: 'La palabra que el usuario adivina (se convertirá a minúsculas).'
+                    }
+                  }
+                }
               }
             }
           },
           responses: {
-            '200' => { description: 'Attempt recorded' },
-            '400' => { description: 'Bad Request' },
-            '401' => { description: 'Unauthorized' },
-            '404' => { description: 'Not Found' }
+            '200' => {
+              description: 'Intento registrado',
+              content: {
+                'application/json' => {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean' },
+                      data: {
+                        type: 'object',
+                        properties: {
+                          message: { type: 'string' },
+                          correct: { type: 'boolean' },
+                          status: { type: 'string', enum: ['playing', 'won', 'lost'] },
+                          feedback: {
+                            type: 'object',
+                            properties: {
+                              positions: {
+                                type: 'array',
+                                items: { type: 'boolean' },
+                                description: 'Array de booleanos indicando coincidencia en cada posición'
+                              },
+                              letter_matches_count: {
+                                type: 'integer',
+                                description: 'Número de letras que aparecen en la palabra (sin importar posición)'
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            '400' => {
+              description: 'Falta la adivinanza o la partida ya terminó',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '401' => {
+              description: 'No autenticado',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '404' => {
+              description: 'Partida no encontrada',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
       '/me/games' => {
         get: {
-          summary: "Get authenticated user's game history",
+          tags: ['User'],
+          summary: "User's game history",
+          description: 'Obtiene el historial de partidas del usuario autenticado.',
           security: [{ bearerAuth: [] }],
-          responses: { '200' => { description: 'OK' }, '401' => { description: 'Unauthorized' } }
+          responses: {
+            '200' => {
+              description: 'Historial de partidas',
+              content: {
+                'application/json' => {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean' },
+                      data: {
+                        type: 'object',
+                        properties: {
+                          games: {
+                            type: 'array',
+                            items: { '$ref' => '#/components/schemas/Game' }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            '401' => {
+              description: 'No autenticado',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
+          }
         }
       },
       '/leaderboard' => {
         get: {
+          tags: ['Leaderboard'],
           summary: 'Leaderboard',
-          responses: { '200' => { description: 'OK' } }
+          description: 'Muestra los 20 mejores jugadores ordenados por victorias y promedio de intentos.',
+          responses: {
+            '200' => {
+              description: 'Ranking de jugadores',
+              content: {
+                'application/json' => {
+                  example: {
+                    success: true,
+                    data: {
+                      leaderboard: [
+                        { id: 1, username: 'angel', wins: 10, losses: 2, avg_attempts_per_win: 4.5 }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       },
       '/_seed_demo' => {
         post: {
-          summary: 'Seed demo data (dev only)',
-          responses: { '200' => { description: 'OK' } }
+          tags: ['Development'],
+          summary: 'Seed demo data',
+          description: 'Carga palabras de ejemplo en la base de datos (solo en entorno de desarrollo).',
+          responses: {
+            '200' => {
+              description: 'Datos de ejemplo cargados o ya existentes',
+              content: {
+                'application/json' => {
+                  example: { success: true, data: { seed: 'ok' } }
+                }
+              }
+            },
+            '403' => {
+              description: 'No permitido en producción',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
+          }
+        }
+      },
+      '/make-me-admin' => {
+        post: {
+          tags: ['Development'],
+          summary: 'Make current user admin',
+          description: 'Convierte al usuario autenticado en administrador (solo en desarrollo).',
+          security: [{ bearerAuth: [] }],
+          responses: {
+            '200' => {
+              description: 'Usuario ahora es admin',
+              content: {
+                'application/json' => {
+                  example: { success: true, data: { message: 'now you are admin' } }
+                }
+              }
+            },
+            '401' => {
+              description: 'No autenticado',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '403' => {
+              description: 'No permitido en producción',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
+          }
         }
       }
     }
