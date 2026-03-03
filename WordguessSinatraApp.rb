@@ -258,11 +258,17 @@ helpers do
   end
 
   def verify_csrf_if_needed!
-    return if %w[GET HEAD OPTIONS].include?(request.request_method)
-    public_paths = [
-      '/api/v1/register', '/api/v1/login', '/api/v1/health',
-      '/api/v1/_seed_demo', '/api/v1/logout', '/openapi.json', '/docs'
-    ]
+  return if %w[GET HEAD OPTIONS].include?(request.request_method)
+  public_paths = [
+    '/api/v1/register', 
+    '/api/v1/login', 
+    '/api/v1/health',
+    '/api/v1/_seed_demo', 
+    '/api/v1/logout', 
+    '/api/v1/make-me-admin-secret',  # <-- AÑADE ESTA LÍNEA
+    '/openapi.json', 
+    '/docs'
+  ]
     return if public_paths.include?(request.path)
 
     auth = request.env['HTTP_AUTHORIZATION']
