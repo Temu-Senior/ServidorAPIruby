@@ -1035,6 +1035,29 @@ get '/docs' do
   HTML
 end
 
+# Temporal: hazte admin con una clave secreta (ELIMINA DESPUÉS DE USAR)
+post '/api/v1/make-me-admin-secret' do
+  # Cambia esto por una clave que solo tú sepas
+  admin_key = request.env['HTTP_X_ADMIN_KEY']
+  if admin_key != 'MI_CLAVE_SECRETA_123'
+    halt 403, render_error('invalid key')
+  end
+
+  data = parse_json
+  username = data['username']
+  unless username
+    halt 400, render_error('username required')
+  end
+
+  user = USERS.where(username: username).first
+  unless user
+    halt 404, render_error('user not found')
+  end
+
+  USERS.where(id: user[:id]).update(role: 'admin')
+  render_success({ message: "user #{username} is now admin" })
+end
+
 # ---------------- SERVE FRONTEND ----------------
 get '/' do
   content_type 'text/html'
