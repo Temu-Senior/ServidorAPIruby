@@ -68,7 +68,10 @@ class Rack::Attack
   end
 end
 
-#use Rack::Attack if ENV['RACK_ENV'] == 'production'
+# --- NUEVA LÍNEA: Configurar store en memoria para Rack::Attack ---
+Rack::Attack.cache.store = Rack::Attack::Store.new
+
+use Rack::Attack if ENV['RACK_ENV'] == 'production'
 
 # ---------------- CORS ----------------
 configure do
@@ -116,9 +119,7 @@ options '*' do
   200
 end
 
-# ---------------- NUEVO: HEALTH CHECK PARA RENDER ----------------
-# Esta ruta es usada por Render para verificar que la aplicación está viva.
-# Responde con un 200 OK y el estado de la base de datos.
+# ---------------- HEALTH CHECK PARA RENDER ----------------
 get '/health' do
   content_type :json
   begin
