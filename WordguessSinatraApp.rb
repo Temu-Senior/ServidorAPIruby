@@ -26,18 +26,20 @@ JWT_EXP_SECONDS = (ENV.fetch('WORDGUESS_JWT_EXP_SECONDS', 3 * 3600).to_i) # defa
 BCOST = ENV.fetch('BCOST', '12').to_i
 
 # CORS origins (comma separated)
+# CORS origins - cambiado para desarrollo + Swagger
 ALLOWED_ORIGINS = if ENV['RACK_ENV'] == 'production'
-  ENV.fetch('CORS_ORIGINS', 'https://wordguessapi.onrender.com').split(',').map(&:strip)
+  ENV.fetch('CORS_ORIGINS', 'https://tu-dominio.com').split(',').map(&:strip)
 else
+  # En local: permite casi todo lo que usa Swagger y frontend común
   [
     'http://localhost:3000',
-    'http://localhost:8080',
+    'http://localhost:8080',     # Swagger más común
     'http://127.0.0.1:8080',
-    'http://localhost:4567',
+    'http://localhost:4567',     # mismo puerto del backend
     'http://127.0.0.1:4567',
     'http://localhost:5000',
     'http://localhost:3001',
-    'http://localhost:4200'
+    'http://localhost:4200'      # por si usas Angular u otro
   ].freeze
 end
 
@@ -51,10 +53,12 @@ end
 
 # ---------------- RACK ATTACK (rate limiting) ----------------
 class Rack::Attack
+  # limit logins: 5 per minute per IP
   throttle('logins/ip', limit: 5, period: 60) do |req|
     req.ip if req.path == '/api/v1/login' && req.post?
   end
 
+  # limit attempts: 20 per minute per IP (guesses)
   throttle('attempts/ip', limit: 20, period: 60) do |req|
     req.ip if req.path =~ %r{^/api/v1/games/\d+/attempts$} && req.post?
   end
@@ -72,10 +76,8 @@ configure do
 end
 
 before do
+  # default JSON response wrapper
   content_type :json
-
-  # ⚠️ SOLUCIÓN: Excluir login de CSRF
-  skip_csrf = (request.path == '/api/v1/login' && request.post?)
 
   origin = request.env['HTTP_ORIGIN']
   if origin && ALLOWED_ORIGINS.any?
@@ -83,6 +85,7 @@ before do
       response.headers['Access-Control-Allow-Origin'] = origin
       response.headers['Access-Control-Allow-Credentials'] = 'true'
     else
+      # block unknown origins (prevents CSRF via cross-site requests with cookies)
       halt 403, render_error('origin not allowed')
     end
   end
@@ -98,8 +101,8 @@ before do
     response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
   end
 
-  # Verify CSRF (pero saltar login)
-  verify_csrf_if_needed! unless skip_csrf
+  # Verify CSRF for mutating requests (double-submit)
+  verify_csrf_if_needed!
 end
 
 options '*' do
@@ -113,17 +116,32 @@ options '*' do
   200
 end
 
+# ---------------- NUEVO: HEALTH CHECK PARA RENDER ----------------
+# Esta ruta es usada por Render para verificar que la aplicación está viva.
+# Responde con un 200 OK y el estado de la base de datos.
+get '/health' do
+  content_type :json
+  begin
+    DB.test_connection
+    { success: true, data: { status: 'ok', db: 'connected' } }.to_json
+  rescue
+    status 500
+    { success: false, error: 'db disconnected' }.to_json
+  end
+end
+
 # ---------------- SCHEMA ----------------
 DB.create_table? :users do
   primary_key :id
   String :username, unique: true, null: false
   String :password_digest, null: false
-  String :role, default: 'user'
+  String :role, default: 'user'      # 'user' | 'admin'
   Integer :wins, default: 0
   Integer :losses, default: 0
   DateTime :created_at
 end
 
+# Migración para agregar columna role si no existe (para bases de datos existentes)
 if DB.table_exists?(:users) && !DB[:users].columns.include?(:role)
   DB.alter_table :users do
     add_column :role, String, default: 'user'
@@ -157,6 +175,7 @@ DB.create_table? :attempts do
   DateTime :created_at
 end
 
+# table to store revoked JWT jti's (simple revocation list)
 DB.create_table? :revoked_tokens do
   primary_key :id
   String :jti, unique: true, null: false
@@ -210,8 +229,11 @@ helpers do
     { token: token, jti: jti }
   end
 
+  # Read JWT from HttpOnly cookie OR Authorization Bearer header.
+  # Return user row or halt.
   def current_user!(halt_on_missing: true)
     token = nil
+    # prefer Authorization Bearer (stateless clients)
     auth = request.env['HTTP_AUTHORIZATION']
     if auth && auth.start_with?('Bearer ')
       token = auth.split(' ', 2)[1]
@@ -228,11 +250,13 @@ helpers do
 
     begin
       decoded = JWT.decode(token, JWT_SECRET, true, algorithm: JWT_ALG)[0]
+      # check revocation
       if REVOKED.where(jti: decoded['jti']).first
         halt 401, render_error('token revoked')
       end
       user = USERS.where(id: decoded['user_id']).first
       halt 401, render_error('invalid user') unless user
+      # Attach token metadata to env so other helpers can inspect if needed
       request.env['wg.token_payload'] = decoded
       request.env['wg.bearer_used'] = bearer_used
       user
@@ -268,9 +292,12 @@ helpers do
     user && user[:role] == 'admin'
   end
 
+  # CSRF verification (double-submit cookie)
   def verify_csrf_if_needed!
+    # skip for safe methods
     return if %w[GET HEAD OPTIONS].include?(request.request_method)
 
+    # Excluir rutas públicas que no necesitan CSRF (versión /api/v1)
     public_paths = [
       '/api/v1/register',
       '/api/v1/login',
@@ -282,15 +309,18 @@ helpers do
     ]
     return if public_paths.include?(request.path)
 
+    # if client sent Bearer auth, skip CSRF check (API clients)
     auth = request.env['HTTP_AUTHORIZATION']
     return if auth && auth.start_with?('Bearer ')
 
+    # For cookie-based sessions: expect wg_csrf cookie and X-WG-CSRF header
     csrf_cookie = request.cookies['wg_csrf']
     csrf_header = request.env['HTTP_X_WG_CSRF'] || request.env['HTTP_X_CSRF_TOKEN']
     if csrf_cookie.nil? || csrf_header.nil?
       halt 403, render_error('csrf token missing', 403)
     end
 
+    # secure compare to prevent timing attacks
     unless Rack::Utils.secure_compare(csrf_cookie, csrf_header)
       halt 403, render_error('invalid csrf token', 403)
     end
@@ -308,7 +338,9 @@ not_found do
   render_error('not found', 404)
 end
 
-# ---------------- ENDPOINTS ----------------
+# ---------------- ENDPOINTS (versionados bajo /api/v1) ----------------
+
+# Health
 get '/api/v1/health' do
   begin
     DB.test_connection
@@ -318,12 +350,14 @@ get '/api/v1/health' do
   end
 end
 
+# Register
 post '/api/v1/register' do
   data = parse_json
   username = data['username']&.strip
   password = data['password']&.strip
   halt 400, render_error('username and password required') unless username && password && username != '' && password != ''
 
+  # validations
   unless username =~ /\A[a-zA-Z0-9_]{3,20}\z/
     halt 400, render_error('invalid username format (3-20 alnum/_)')
   end
@@ -341,6 +375,7 @@ post '/api/v1/register' do
   render_success({ id: user[:id], username: user[:username] }, 201)
 end
 
+# Login
 post '/api/v1/login' do
   data = parse_json
   username = data['username']
@@ -356,6 +391,7 @@ post '/api/v1/login' do
   token = token_obj[:token]
   jti = token_obj[:jti]
 
+  # Cookie HttpOnly for JWT (browser will send it automatically)
   response.set_cookie('wg_token', value: token,
     httponly: true,
     secure: ENV['RACK_ENV'] == 'production',
@@ -364,6 +400,7 @@ post '/api/v1/login' do
     max_age: JWT_EXP_SECONDS
   )
 
+  # CSRF token (double-submit cookie) - readable by JS
   csrf = SecureRandom.hex(32)
   response.set_cookie('wg_csrf', value: csrf,
     httponly: false,
@@ -376,8 +413,12 @@ post '/api/v1/login' do
   render_success({ message: 'login successful', token: token })
 end
 
+# Refresh token (renew cookie) - accepts cookie or bearer
 post '/api/v1/refresh' do
+  # require valid token first
   user = current_user!
+  payload = request.env['wg.token_payload']
+  # issue new token
   token_obj = generate_token(user[:id])
   token = token_obj[:token]
 
@@ -389,6 +430,7 @@ post '/api/v1/refresh' do
     max_age: JWT_EXP_SECONDS
   )
 
+  # rotate csrf cookie too (if cookie-based)
   unless request.env['wg.bearer_used']
     new_csrf = SecureRandom.hex(32)
     response.set_cookie('wg_csrf', value: new_csrf, httponly: false, secure: ENV['RACK_ENV'] == 'production', same_site: :lax, path: '/', max_age: JWT_EXP_SECONDS)
@@ -397,8 +439,11 @@ post '/api/v1/refresh' do
   render_success({ message: 'token refreshed' })
 end
 
+# Logout
 post '/api/v1/logout' do
+  # Try to revoke token server-side: read token payload
   begin
+    payload = nil
     auth = request.env['HTTP_AUTHORIZATION']
     if auth && auth.start_with?('Bearer ')
       token = auth.split(' ', 2)[1]
@@ -411,13 +456,16 @@ post '/api/v1/logout' do
       REVOKED.insert(jti: decoded['jti'], revoked_at: Time.now) rescue nil
     end
   rescue
+    # ignore decode errors on logout
   end
 
+  # delete cookies client-side
   response.delete_cookie('wg_token', path: '/')
   response.delete_cookie('wg_csrf', path: '/')
   render_success({ message: 'logged out' })
 end
 
+# Create a word (auth required, admin only)
 post '/api/v1/words' do
   user = current_user!
   halt 403, render_error('admin only') unless user_is_admin?(user)
@@ -445,6 +493,7 @@ post '/api/v1/words' do
   render_success({ id: word[:id], text: word[:text], difficulty: word[:difficulty], date: word[:date] }, 201)
 end
 
+# List words (filter by date/difficulty) - public endpoint (returns full text)
 get '/api/v1/words' do
   q = WORDS
   if params['date']
@@ -461,6 +510,7 @@ get '/api/v1/words' do
   render_success({ words: words })
 end
 
+# Start a game for authenticated user
 post '/api/v1/games' do
   user = current_user!
   data = parse_json
@@ -487,6 +537,7 @@ post '/api/v1/games' do
   render_success({ id: game[:id], attempts_allowed: game[:attempts_allowed], status: game[:status], word_length: word_row[:text].length }, 201)
 end
 
+# Get game state
 get '/api/v1/games/:id' do |id|
   user = current_user!
   game = GAMES.where(id: id, user_id: user[:id]).first
@@ -503,6 +554,7 @@ get '/api/v1/games/:id' do |id|
   })
 end
 
+# Submit an attempt
 post '/api/v1/games/:id/attempts' do |id|
   user = current_user!
   game = GAMES.where(id: id, user_id: user[:id]).first
@@ -533,6 +585,7 @@ post '/api/v1/games/:id/attempts' do |id|
   render_success({ message: 'attempt recorded', correct: correct, status: new_status, feedback: feedback })
 end
 
+# Get user's game history
 get '/api/v1/me/games' do
   user = current_user!
   games = GAMES.where(user_id: user[:id]).order(Sequel.desc(:created_at)).all.map do |g|
@@ -549,6 +602,7 @@ get '/api/v1/me/games' do
   render_success({ games: games })
 end
 
+# Leaderboard
 get '/api/v1/leaderboard' do
   rows = DB.fetch(<<~SQL)
     SELECT u.id, u.username, u.wins, u.losses,
@@ -569,6 +623,7 @@ get '/api/v1/leaderboard' do
   render_success({ leaderboard: data })
 end
 
+# Seed demo (dev only)
 post '/api/v1/_seed_demo' do
   halt 403, render_error('not allowed in production') if ENV['RACK_ENV'] == 'production'
   return render_success({ seed: 'already seeded' }) if WORDS.count > 0
@@ -578,6 +633,7 @@ post '/api/v1/_seed_demo' do
   render_success({ seed: 'ok' })
 end
 
+# Hacer admin al usuario actual (solo desarrollo)
 post '/api/v1/make-me-admin' do
   halt 403, render_error('not allowed in production') if ENV['RACK_ENV'] == 'production'
   user = current_user!
@@ -585,6 +641,7 @@ post '/api/v1/make-me-admin' do
   render_success({ message: 'now you are admin' })
 end
 
+# OpenAPI
 get '/openapi.json' do
   spec = {
     openapi: '3.0.1',
@@ -604,16 +661,38 @@ get '/openapi.json' do
           type: 'object',
           required: ['username', 'password'],
           properties: {
-            username: { type: 'string', description: 'Nombre de usuario. Solo letras, números y guion bajo. Longitud 3-20.', example: 'angel', minLength: 3, maxLength: 20, pattern: '^[a-zA-Z0-9_]+$' },
-            password: { type: 'string', description: 'Contraseña. Mínimo 6 caracteres.', example: 'secret123', minLength: 6, format: 'password' }
+            username: {
+              type: 'string',
+              description: 'Nombre de usuario. Solo letras, números y guion bajo. Longitud 3-20.',
+              example: 'angel',
+              minLength: 3,
+              maxLength: 20,
+              pattern: '^[a-zA-Z0-9_]+$'
+            },
+            password: {
+              type: 'string',
+              description: 'Contraseña. Mínimo 6 caracteres.',
+              example: 'secret123',
+              minLength: 6,
+              format: 'password'
+            }
           }
         },
         LoginRequest: {
           type: 'object',
           required: ['username', 'password'],
           properties: {
-            username: { type: 'string', description: 'Nombre de usuario registrado.', example: 'angel' },
-            password: { type: 'string', description: 'Contraseña del usuario.', example: 'secret123', format: 'password' }
+            username: {
+              type: 'string',
+              description: 'Nombre de usuario registrado.',
+              example: 'angel'
+            },
+            password: {
+              type: 'string',
+              description: 'Contraseña del usuario.',
+              example: 'secret123',
+              format: 'password'
+            }
           }
         },
         Error: {
@@ -663,7 +742,11 @@ get '/openapi.json' do
           responses: {
             '200' => {
               description: 'Servidor OK',
-              content: { 'application/json' => { example: { success: true, data: { status: 'ok', db: 'connected' } } } }
+              content: {
+                'application/json' => {
+                  example: { success: true, data: { status: 'ok', db: 'connected' } }
+                }
+              }
             },
             '500' => {
               description: 'Error de conexión con la base de datos',
@@ -679,15 +762,42 @@ get '/openapi.json' do
           description: 'Crea una nueva cuenta de usuario.',
           requestBody: {
             required: true,
-            content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/RegisterRequest' } } }
+            content: {
+              'application/json' => {
+                schema: { '$ref' => '#/components/schemas/RegisterRequest' }
+              }
+            }
           },
           responses: {
             '201' => {
               description: 'Usuario creado exitosamente',
-              content: { 'application/json' => { example: { success: true, data: { id: 1, username: 'angel' } } } }
+              content: {
+                'application/json' => {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean', example: true },
+                      data: {
+                        type: 'object',
+                        properties: {
+                          id: { type: 'integer', description: 'ID del nuevo usuario' },
+                          username: { type: 'string', description: 'Nombre de usuario' }
+                        }
+                      }
+                    }
+                  },
+                  example: { success: true, data: { id: 1, username: 'angel' } }
+                }
+              }
             },
-            '400' => { description: 'Datos inválidos', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } },
-            '409' => { description: 'El nombre de usuario ya existe', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } }
+            '400' => {
+              description: 'Datos inválidos (formato de usuario o contraseña incorrectos)',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '409' => {
+              description: 'El nombre de usuario ya existe',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
@@ -698,15 +808,41 @@ get '/openapi.json' do
           description: 'Inicia sesión y devuelve un token JWT (en cookie HttpOnly y en el cuerpo).',
           requestBody: {
             required: true,
-            content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/LoginRequest' } } }
+            content: {
+              'application/json' => {
+                schema: { '$ref' => '#/components/schemas/LoginRequest' }
+              }
+            }
           },
           responses: {
             '200' => {
               description: 'Login exitoso',
-              content: { 'application/json' => { example: { success: true, data: { message: 'login successful', token: '...' } } } }
+              content: {
+                'application/json' => {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean', example: true },
+                      data: {
+                        type: 'object',
+                        properties: {
+                          message: { type: 'string', example: 'login successful' },
+                          token: { type: 'string', description: 'Token JWT para usar en Bearer Auth' }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
             },
-            '400' => { description: 'Faltan credenciales', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } },
-            '401' => { description: 'Credenciales inválidas', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } }
+            '400' => {
+              description: 'Faltan credenciales',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '401' => {
+              description: 'Credenciales inválidas',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
@@ -717,7 +853,14 @@ get '/openapi.json' do
           description: 'Cierra la sesión actual, revoca el token y elimina las cookies.',
           security: [{ bearerAuth: [] }, { cookieAuth: [] }],
           responses: {
-            '200' => { description: 'Logout exitoso', content: { 'application/json' => { example: { success: true, data: { message: 'logged out' } } } } }
+            '200' => {
+              description: 'Logout exitoso',
+              content: {
+                'application/json' => {
+                  example: { success: true, data: { message: 'logged out' } }
+                }
+              }
+            }
           }
         }
       },
@@ -727,15 +870,48 @@ get '/openapi.json' do
           summary: 'List words',
           description: 'Obtiene lista de palabras. Opcionalmente filtra por fecha y/o dificultad.',
           parameters: [
-            { name: 'date', in: 'query', required: false, schema: { type: 'string', format: 'date' }, description: 'Fecha en formato YYYY-MM-DD.' },
-            { name: 'difficulty', in: 'query', required: false, schema: { type: 'string', enum: ['easy', 'medium', 'hard'] }, description: 'Dificultad de la palabra.' }
+            {
+              name: 'date',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', format: 'date' },
+              description: 'Fecha en formato YYYY-MM-DD. Devuelve la palabra asignada a esa fecha.'
+            },
+            {
+              name: 'difficulty',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', enum: ['easy', 'medium', 'hard'] },
+              description: 'Dificultad de la palabra.'
+            }
           ],
           responses: {
             '200' => {
               description: 'Lista de palabras',
-              content: { 'application/json' => { schema: { type: 'object', properties: { success: { type: 'boolean' }, data: { type: 'object', properties: { words: { type: 'array', items: { '$ref' => '#/components/schemas/Word' } } } } } } } }
+              content: {
+                'application/json' => {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean' },
+                      data: {
+                        type: 'object',
+                        properties: {
+                          words: {
+                            type: 'array',
+                            items: { '$ref' => '#/components/schemas/Word' }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
             },
-            '400' => { description: 'Formato de fecha inválido', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } }
+            '400' => {
+              description: 'Formato de fecha inválido',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         },
         post: {
@@ -751,19 +927,53 @@ get '/openapi.json' do
                   type: 'object',
                   required: ['text'],
                   properties: {
-                    text: { type: 'string', description: 'La palabra a agregar. Se guardará en minúsculas.' },
-                    difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'], default: 'medium', description: 'Dificultad de la palabra.' },
-                    date: { type: 'string', format: 'date', description: 'Fecha asociada a la palabra (opcional).' }
+                    text: {
+                      type: 'string',
+                      description: 'La palabra a agregar. Se guardará en minúsculas.'
+                    },
+                    difficulty: {
+                      type: 'string',
+                      enum: ['easy', 'medium', 'hard'],
+                      default: 'medium',
+                      description: 'Dificultad de la palabra.'
+                    },
+                    date: {
+                      type: 'string',
+                      format: 'date',
+                      description: 'Fecha asociada a la palabra (opcional).'
+                    }
                   }
                 }
               }
             }
           },
           responses: {
-            '201' => { description: 'Palabra creada', content: { 'application/json' => { schema: { type: 'object', properties: { success: { type: 'boolean' }, data: { '$ref' => '#/components/schemas/Word' } } } } } },
-            '400' => { description: 'Texto requerido o fecha inválida', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } },
-            '401' => { description: 'No autenticado', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } },
-            '403' => { description: 'Requiere rol de administrador', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } }
+            '201' => {
+              description: 'Palabra creada',
+              content: {
+                'application/json' => {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean' },
+                      data: { '$ref' => '#/components/schemas/Word' }
+                    }
+                  }
+                }
+              }
+            },
+            '400' => {
+              description: 'Texto requerido o fecha inválida',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '401' => {
+              description: 'No autenticado',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '403' => {
+              description: 'Requiere rol de administrador',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
@@ -780,17 +990,43 @@ get '/openapi.json' do
                 schema: {
                   type: 'object',
                   properties: {
-                    date: { type: 'string', format: 'date', description: 'Fecha de la palabra a jugar. Si no se envía, se elige una palabra al azar.' }
+                    date: {
+                      type: 'string',
+                      format: 'date',
+                      description: 'Fecha de la palabra a jugar. Si no se envía, se elige una palabra al azar.'
+                    }
                   }
                 }
               }
             }
           },
           responses: {
-            '201' => { description: 'Partida creada', content: { 'application/json' => { schema: { type: 'object', properties: { success: { type: 'boolean' }, data: { '$ref' => '#/components/schemas/Game' } } } } } },
-            '400' => { description: 'Formato de fecha inválido', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } },
-            '401' => { description: 'No autenticado', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } },
-            '404' => { description: 'No hay palabra para la fecha indicada o no hay palabras disponibles', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } }
+            '201' => {
+              description: 'Partida creada',
+              content: {
+                'application/json' => {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean' },
+                      data: { '$ref' => '#/components/schemas/Game' }
+                    }
+                  }
+                }
+              }
+            },
+            '400' => {
+              description: 'Formato de fecha inválido',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '401' => {
+              description: 'No autenticado',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '404' => {
+              description: 'No hay palabra para la fecha indicada o no hay palabras disponibles',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
@@ -800,7 +1036,15 @@ get '/openapi.json' do
           summary: 'Get game state',
           description: 'Obtiene el estado actual de una partida, incluyendo los intentos realizados.',
           security: [{ bearerAuth: [] }],
-          parameters: [ { name: 'id', in: 'path', required: true, schema: { type: 'integer' }, description: 'ID de la partida' } ],
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'integer' },
+              description: 'ID de la partida'
+            }
+          ],
           responses: {
             '200' => {
               description: 'Estado de la partida',
@@ -813,7 +1057,16 @@ get '/openapi.json' do
                       data: {
                         allOf: [
                           { '$ref' => '#/components/schemas/Game' },
-                          { type: 'object', properties: { attempts: { type: 'array', items: { '$ref' => '#/components/schemas/Attempt' } } } }
+                          {
+                            type: 'object',
+                            properties: {
+                              attempts: {
+                                type: 'array',
+                                items: { '$ref' => '#/components/schemas/Attempt' },
+                                description: 'Lista de intentos realizados'
+                              }
+                            }
+                          }
                         ]
                       }
                     }
@@ -821,8 +1074,14 @@ get '/openapi.json' do
                 }
               }
             },
-            '401' => { description: 'No autenticado', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } },
-            '404' => { description: 'Partida no encontrada o no pertenece al usuario', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } }
+            '401' => {
+              description: 'No autenticado',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '404' => {
+              description: 'Partida no encontrada o no pertenece al usuario',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
@@ -832,7 +1091,15 @@ get '/openapi.json' do
           summary: 'Submit an attempt',
           description: 'Envía una palabra como intento para la partida especificada.',
           security: [{ bearerAuth: [] }],
-          parameters: [ { name: 'id', in: 'path', required: true, schema: { type: 'integer' }, description: 'ID de la partida' } ],
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'integer' },
+              description: 'ID de la partida'
+            }
+          ],
           requestBody: {
             required: true,
             content: {
@@ -841,7 +1108,10 @@ get '/openapi.json' do
                   type: 'object',
                   required: ['guess'],
                   properties: {
-                    guess: { type: 'string', description: 'La palabra que el usuario adivina (se convertirá a minúsculas).' }
+                    guess: {
+                      type: 'string',
+                      description: 'La palabra que el usuario adivina (se convertirá a minúsculas).'
+                    }
                   }
                 }
               }
@@ -865,8 +1135,15 @@ get '/openapi.json' do
                           feedback: {
                             type: 'object',
                             properties: {
-                              positions: { type: 'array', items: { type: 'boolean' }, description: 'Array de booleanos indicando coincidencia en cada posición' },
-                              letter_matches_count: { type: 'integer', description: 'Número de letras que aparecen en la palabra (sin importar posición)' }
+                              positions: {
+                                type: 'array',
+                                items: { type: 'boolean' },
+                                description: 'Array de booleanos indicando coincidencia en cada posición'
+                              },
+                              letter_matches_count: {
+                                type: 'integer',
+                                description: 'Número de letras que aparecen en la palabra (sin importar posición)'
+                              }
                             }
                           }
                         }
@@ -876,9 +1153,18 @@ get '/openapi.json' do
                 }
               }
             },
-            '400' => { description: 'Falta la adivinanza o la partida ya terminó', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } },
-            '401' => { description: 'No autenticado', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } },
-            '404' => { description: 'Partida no encontrada', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } }
+            '400' => {
+              description: 'Falta la adivinanza o la partida ya terminó',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '401' => {
+              description: 'No autenticado',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '404' => {
+              description: 'Partida no encontrada',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
@@ -900,7 +1186,10 @@ get '/openapi.json' do
                       data: {
                         type: 'object',
                         properties: {
-                          games: { type: 'array', items: { '$ref' => '#/components/schemas/Game' } }
+                          games: {
+                            type: 'array',
+                            items: { '$ref' => '#/components/schemas/Game' }
+                          }
                         }
                       }
                     }
@@ -908,7 +1197,10 @@ get '/openapi.json' do
                 }
               }
             },
-            '401' => { description: 'No autenticado', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } }
+            '401' => {
+              description: 'No autenticado',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
@@ -942,8 +1234,18 @@ get '/openapi.json' do
           summary: 'Seed demo data',
           description: 'Carga palabras de ejemplo en la base de datos (solo en entorno de desarrollo).',
           responses: {
-            '200' => { description: 'Datos de ejemplo cargados o ya existentes', content: { 'application/json' => { example: { success: true, data: { seed: 'ok' } } } } },
-            '403' => { description: 'No permitido en producción', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } }
+            '200' => {
+              description: 'Datos de ejemplo cargados o ya existentes',
+              content: {
+                'application/json' => {
+                  example: { success: true, data: { seed: 'ok' } }
+                }
+              }
+            },
+            '403' => {
+              description: 'No permitido en producción',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       },
@@ -954,9 +1256,22 @@ get '/openapi.json' do
           description: 'Convierte al usuario autenticado en administrador (solo en desarrollo).',
           security: [{ bearerAuth: [] }],
           responses: {
-            '200' => { description: 'Usuario ahora es admin', content: { 'application/json' => { example: { success: true, data: { message: 'now you are admin' } } } } },
-            '401' => { description: 'No autenticado', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } },
-            '403' => { description: 'No permitido en producción', content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } } }
+            '200' => {
+              description: 'Usuario ahora es admin',
+              content: {
+                'application/json' => {
+                  example: { success: true, data: { message: 'now you are admin' } }
+                }
+              }
+            },
+            '401' => {
+              description: 'No autenticado',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            },
+            '403' => {
+              description: 'No permitido en producción',
+              content: { 'application/json' => { schema: { '$ref' => '#/components/schemas/Error' } } }
+            }
           }
         }
       }
@@ -965,6 +1280,7 @@ get '/openapi.json' do
   spec.to_json
 end
 
+# Swagger UI (docs)
 get '/docs' do
   content_type 'text/html'
   <<~HTML
@@ -987,17 +1303,21 @@ get '/docs' do
   HTML
 end
 
+# Static frontend serving (modificado para usar /api/v1 como base)
 get '/' do
   content_type 'text/html'
   html = File.read(File.join(settings.root, 'frontend', 'index.html'))
+  # Reemplazar la constante API_BASE para que apunte a /api/v1
   html.gsub!("const API_BASE = 'http://127.0.0.1:4567';", "const API_BASE = '/api/v1';")
   html
 rescue Errno::ENOENT
+  # Si no existe el archivo, mostrar un mensaje por defecto
   "<h1>Wordguess API</h1><p>Frontend no encontrado. La API está disponible en <a href='/docs'>/docs</a>.</p>"
 end
 
 set :public_folder, File.join(settings.root, 'frontend')
 
+# Run server (si se ejecuta el archivo directamente)
 if __FILE__ == $0
   port = settings.port || ENV.fetch('PORT', 4567).to_i
   puts "Starting Wordguess Sinatra API on port #{port} -- DB: #{DB_FILE}"
