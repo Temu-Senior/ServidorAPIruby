@@ -341,8 +341,7 @@ post '/api/v1/login' do
     halt 401, render_error('invalid credentials', 401)
   end
 
-  # --- LÍNEAS NUEVAS: Si el usuario es 'angel', lo hace admin (temporal) ---
-  if username == 'angel'
+   if username == 'angel' && ENV['MAKE_ANGEL_ADMIN'] == 'true'
     USERS.where(id: user[:id]).update(role: 'admin')
     user = USERS.where(id: user[:id]).first  # Recargar usuario actualizado
   end
