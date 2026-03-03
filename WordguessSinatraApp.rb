@@ -68,7 +68,7 @@ class Rack::Attack
   end
 end
 
-use Rack::Attack if ENV['RACK_ENV'] == 'production'
+#use Rack::Attack if ENV['RACK_ENV'] == 'production'
 
 # ---------------- CORS ----------------
 configure do
