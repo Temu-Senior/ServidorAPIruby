@@ -69,7 +69,7 @@ class Rack::Attack
 end
 
 # --- NUEVA LÍNEA: Configurar store en memoria para Rack::Attack ---
-Rack::Attack.cache.store = Rack::Attack::Store.new
+Rack::Attack.cache.store = Rack::Attack::MemoryStore.new
 
 use Rack::Attack if ENV['RACK_ENV'] == 'production'
 
